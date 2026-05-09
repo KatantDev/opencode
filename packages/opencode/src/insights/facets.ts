@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { generateObject, type LanguageModel, type LanguageModelUsage, type ProviderMetadata } from "ai"
+import { AISDKError, generateObject, type LanguageModel, type LanguageModelUsage, type ProviderMetadata } from "ai"
 import { z } from "zod"
 import path from "node:path"
 import { mkdir } from "node:fs/promises"
@@ -111,12 +111,36 @@ export interface ExtractFacetInput {
    * for the post-run summary.
    */
   onUsage?: (e: UsageEvent) => void
+  /**
+   * Called exactly once when the facet is served from the on-disk cache (i.e.
+   * no LLM round-trip happened). Lets the caller maintain an authoritative
+   * cache-hit count without inferring it arithmetically — important because
+   * `saveCachedFacet` failures must NOT mask cache hits.
+   */
+  onCacheHit?: () => void
 }
+
+/**
+ * Wraps an AI-SDK promise so that recoverable provider errors (network
+ * blips, malformed model output, API errors) are converted to a tagged
+ * `Error` we can fall back from with `Effect.orElseSucceed(() => null)`,
+ * while unexpected programmer errors (TypeError, RangeError, etc.) propagate
+ * as defects so regressions are visible instead of being silently swallowed.
+ */
+const tryAISDK = <T>(label: string, run: () => Promise<T>) =>
+  Effect.tryPromise({
+    try: run,
+    catch: (e) => {
+      if (AISDKError.isInstance(e)) return new Error(`${label}: ${String(e)}`)
+      throw e
+    },
+  })
 
 export const extractFacet = (input: ExtractFacetInput) =>
   Effect.fn("Insights.extractFacet")(function* () {
     const cached = yield* Effect.promise(() => loadCachedFacet(input.meta.session_id, input.meta.end_time))
     if (cached) {
+      input.onCacheHit?.()
       input.onProgress?.()
       return cached as SessionFacets | null
     }
@@ -124,31 +148,31 @@ export const extractFacet = (input: ExtractFacetInput) =>
     const transcript = formatTranscript(input.meta, input.messages)
     // `compactTranscript` itself runs LLM `summariseChunk` calls under the hood
     // which can fail on malformed responses; isolate them so a single bad
-    // session doesn't kill the whole pipeline.
-    const compacted = yield* Effect.tryPromise({
-      try: () => compactTranscript(input.model, input.meta, transcript, input.onUsage),
-      catch: (e) => new Error(`compact ${input.meta.session_id}: ${String(e)}`),
-    }).pipe(Effect.orElseSucceed(() => null))
+    // session doesn't kill the whole pipeline. AI-SDK errors are recoverable;
+    // anything else (TypeError, programmer bugs) bubbles up as a defect.
+    const compacted = yield* tryAISDK(`compact ${input.meta.session_id}`, () =>
+      compactTranscript(input.model, input.meta, transcript, input.onUsage),
+    ).pipe(Effect.orElseSucceed(() => null))
 
     if (compacted === null) {
       input.onProgress?.()
       return null
     }
 
-    const facetOrNull = yield* Effect.tryPromise({
-      try: async () => {
-        const result = await generateObject({
-          model: input.model,
-          schema: SessionFacetsInput,
-          prompt: FACET_EXTRACTION_PROMPT + compacted,
-          maxOutputTokens: 4096,
-        })
-        input.onUsage?.({ usage: result.usage, metadata: result.providerMetadata, kind: "facet" })
-        const facet = fromSessionFacetsInput(input.meta.session_id, result.object)
-        await saveCachedFacet(facet, input.meta.end_time)
-        return facet
-      },
-      catch: (e) => new Error(`facet ${input.meta.session_id}: ${String(e)}`),
+    const facetOrNull = yield* tryAISDK(`facet ${input.meta.session_id}`, async () => {
+      const result = await generateObject({
+        model: input.model,
+        schema: SessionFacetsInput,
+        prompt: FACET_EXTRACTION_PROMPT + compacted,
+        maxOutputTokens: 4096,
+      })
+      input.onUsage?.({ usage: result.usage, metadata: result.providerMetadata, kind: "facet" })
+      const facet = fromSessionFacetsInput(input.meta.session_id, result.object)
+      // Persisting the cache is best-effort: a disk-full / EACCES failure
+      // shouldn't waste the LLM round-trip we just paid for. Swallow the
+      // error and return the in-memory facet anyway.
+      await saveCachedFacet(facet, input.meta.end_time).catch(() => {})
+      return facet
     }).pipe(Effect.orElseSucceed(() => null))
 
     input.onProgress?.()

@@ -78,8 +78,18 @@ export const SessionFacetsInput = z.object({
 })
 export type SessionFacetsInput = z.infer<typeof SessionFacetsInput>
 
-const kvToRecord = (pairs: Array<{ key: string; value: number }>): Record<string, number> =>
-  Object.fromEntries(pairs.map((p) => [p.key, p.value]))
+// LLMs occasionally emit two pairs with the same key (the schema can't forbid
+// it because it's an array, not a record). Sum duplicates rather than letting
+// the last write silently overwrite — losing a count is worse than over-
+// counting on the rare malformed response, and the downstream aggregator
+// already treats these as additive frequencies.
+const kvToRecord = (pairs: Array<{ key: string; value: number }>): Record<string, number> => {
+  const acc: Record<string, number> = {}
+  for (const p of pairs) {
+    acc[p.key] = (acc[p.key] ?? 0) + p.value
+  }
+  return acc
+}
 
 export function fromSessionFacetsInput(session_id: string, input: SessionFacetsInput): SessionFacets {
   return {

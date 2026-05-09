@@ -43,15 +43,15 @@ export interface RunOptions {
   projectFilter?: string
   limit?: number
   withLLM: boolean
-  model?: LanguageModel
   /**
-   * `Provider.Model` metadata (carries `cost.input`/`cost.output`/cache rates
-   * per 1M tokens). Used to compute real cost from each LLM call's usage and
-   * to pick the >200K-context tier when applicable. Optional even with
-   * `withLLM: true`: if missing, the run will still succeed but the returned
-   * `costUSD` will be `0`.
+   * The LLM to use, as a `(language, metadata)` pair. Both halves are required
+   * together so a caller can't accidentally hand off a `LanguageModel` from
+   * one provider with the cost/context metadata of another. If omitted with
+   * `withLLM: true`, the run dies with a `model required` defect. With a
+   * paired `metadata`, real cost is computed per call via `Session.getUsage`;
+   * without the pair (i.e. `withLLM: false`), `costUSD` stays `0`.
    */
-  modelMetadata?: Provider.Model
+  model?: { language: LanguageModel; metadata: Provider.Model }
   open: boolean
   /**
    * Optional progress reporter for LLM calls. Total = sessions + 7 sections.
@@ -135,10 +135,11 @@ export const run = (opts: RunOptions) =>
       reasoning: 0,
       callsByKind: { facet: 0, chunk_summary: 0, section: 0 } as Record<UsageEvent["kind"], number>,
     }
+    const metadata = opts.model?.metadata
     const onUsage = (e: UsageEvent) => {
       usageState.callsByKind[e.kind] += 1
-      if (!opts.modelMetadata) return
-      const u = Session.getUsage({ model: opts.modelMetadata, usage: e.usage, metadata: e.metadata })
+      if (!metadata) return
+      const u = Session.getUsage({ model: metadata, usage: e.usage, metadata: e.metadata })
       usageState.cost += u.cost
       usageState.input += u.tokens.input
       usageState.output += u.tokens.output
@@ -146,21 +147,32 @@ export const run = (opts: RunOptions) =>
       usageState.cacheWrite += u.tokens.cache.write
       usageState.reasoning += u.tokens.reasoning
     }
+    // Authoritative cache-hit counter, incremented by `extractFacet` only on
+    // the cached path. We deliberately do NOT infer this arithmetically from
+    // `(facets produced) - (facet usage events)` because that formula
+    // underflows when a fresh LLM call succeeds but `saveCachedFacet` then
+    // throws (disk full, EACCES) — `onUsage` already fired but the returned
+    // facet is `null`, falsely shrinking the apparent hit count.
+    const cacheState = { hits: 0 }
+    const onCacheHit = () => {
+      cacheState.hits += 1
+    }
 
     const facetsMap = new Map<string, SessionFacets>()
     const facetsResult = proceedWithLLM
       ? yield* Effect.gen(function* () {
           if (!opts.model) return yield* Effect.die(new Error("model required when withLLM=true"))
-          const model = opts.model
+          const language = opts.model.language
           return yield* Effect.forEach(
             metas,
             (m) =>
               extractFacet({
                 meta: m.meta,
                 messages: m.messages,
-                model,
+                model: language,
                 onProgress: () => tick("facets"),
                 onUsage,
+                onCacheHit,
               }),
             { concurrency: 4 },
           )
@@ -169,12 +181,7 @@ export const run = (opts: RunOptions) =>
     for (const f of facetsResult) {
       if (f) facetsMap.set(f.session_id, f)
     }
-    // Cache hits = sessions which produced a facet but did NOT trigger a
-    // `facet`-kind usage event (those are LLM round-trips, cache lookups stay
-    // silent on `onUsage`).
-    const cachedFacets = proceedWithLLM
-      ? Math.max(0, facetsResult.filter((f) => f).length - usageState.callsByKind.facet)
-      : 0
+    const cachedFacets = proceedWithLLM ? cacheState.hits : 0
 
     const agg = aggregate(
       metas.map((m) => m.meta),
@@ -184,7 +191,7 @@ export const run = (opts: RunOptions) =>
     const sections: Sections =
       proceedWithLLM && opts.model
         ? yield* generateSections({
-            model: opts.model,
+            model: opts.model.language,
             aggregate: agg,
             facets: [...facetsMap.values()],
             onProgress: () => tick("sections"),

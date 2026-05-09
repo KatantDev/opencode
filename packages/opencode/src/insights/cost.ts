@@ -89,17 +89,28 @@ export function estimateLLMCost(
     sectionCalls * SECTION_OUTPUT_TOKENS +
     chunkSummaryCalls * CHUNK_SUMMARY_OUTPUT_TOKENS
 
-  // Per-million pricing → USD.
+  // Per-million pricing → USD. Note: this excludes any cache-read discount
+  // because we don't model cache hits in a pre-flight estimate — at quote
+  // time we don't know which prefix tokens the provider will mark as cached.
+  // The displayed number is therefore a conservative upper bound; actual
+  // billed cost may be lower when prompt caching kicks in.
   const costUSD = (inputTokens * model.cost.input) / 1_000_000 + (outputTokens * model.cost.output) / 1_000_000
 
   // Time: actual LLM-bound calls (uncached facets + sections) split across
   // CONCURRENCY workers. Cached facets resolve from disk in microseconds, so
-  // they don't show up here. Chunk summaries are serial within a single
-  // `extractFacet`, so add them as extra wall time.
+  // they don't show up here. Chunk summaries inside `extractFacet` run via
+  // `Promise.all` (parallel within a single session) but the SESSION itself
+  // sits in the same `Effect.forEach({concurrency:4})` pool as the facet
+  // call — so chunk summaries add *per-session* wall time before the facet
+  // call, not extra concurrent throughput. Approximate the overhead as the
+  // average per-session chunk count × one call's worth of seconds, instead
+  // of the previous formulation which double-counted by treating chunks as
+  // independent concurrent calls (`chunkSummaryCalls / CONCURRENCY`).
   const llmBoundCalls = facetCalls + sectionCalls
-  const concurrentSeconds = (llmBoundCalls / CONCURRENCY) * AVG_CALL_SECONDS
-  const chunkSeconds = (chunkSummaryCalls / CONCURRENCY) * AVG_CALL_SECONDS
-  const estSeconds = Math.max(1, Math.round(concurrentSeconds + chunkSeconds))
+  const baseSeconds = (llmBoundCalls / CONCURRENCY) * AVG_CALL_SECONDS
+  const avgChunksPerSession = facetCalls > 0 ? chunkSummaryCalls / facetCalls : 0
+  const chunkOverhead = avgChunksPerSession * AVG_CALL_SECONDS
+  const estSeconds = Math.max(1, Math.round(baseSeconds + chunkOverhead))
 
   return {
     facetCalls,
