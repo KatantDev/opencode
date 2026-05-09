@@ -4,7 +4,8 @@ import path from "node:path"
 import { tmpdir } from "node:os"
 import { Effect } from "effect"
 import { extractFacet, saveCachedFacet } from "@/insights/facets"
-import type { SessionFacets, SessionMeta } from "@/insights/schema"
+import type { SessionFacets } from "@/insights/schema"
+import { sessionMeta } from "./_fixtures"
 
 const sample: SessionFacets = {
   session_id: "wiringtest01",
@@ -20,42 +21,7 @@ const sample: SessionFacets = {
   brief_summary: "Sample brief.",
 }
 
-const meta: SessionMeta = {
-  session_id: sample.session_id,
-  project_id: "p",
-  project_path: "/p",
-  start_time: 0,
-  end_time: 1000,
-  duration_minutes: 1,
-  user_message_count: 1,
-  assistant_message_count: 1,
-  tool_counts: {},
-  languages: {},
-  git_commits: 0,
-  git_pushes: 0,
-  input_tokens: 0,
-  output_tokens: 0,
-  reasoning_tokens: 0,
-  cache_read_tokens: 0,
-  cache_write_tokens: 0,
-  total_cost: 0,
-  user_interruptions: 0,
-  user_response_times_sec: [],
-  tool_errors: 0,
-  tool_error_categories: {},
-  uses_task_agent: false,
-  uses_mcp: false,
-  uses_web_search: false,
-  uses_web_fetch: false,
-  lines_added: 0,
-  lines_removed: 0,
-  files_modified: 0,
-  message_hours: [],
-  user_message_timestamps_ms: [],
-  agents_used: [],
-  models_used: [],
-  first_user_prompt: "",
-}
+const meta = sessionMeta({ session_id: sample.session_id })
 
 let tmp: string
 
@@ -87,4 +53,54 @@ describe("extractFacet onProgress wiring", () => {
     expect(result?.session_id).toBe(sample.session_id)
     expect(calls.length).toBe(1)
   })
+
+  test("does NOT invoke onUsage on cache hit (only fresh LLM calls emit usage)", async () => {
+    await saveCachedFacet(sample, meta.end_time)
+    const usageEvents: unknown[] = []
+    const result = await Effect.runPromise(
+      extractFacet({
+        meta,
+        messages: [],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        model: {} as any,
+        onProgress: () => {},
+        onUsage: (e) => usageEvents.push(e),
+      }),
+    )
+    expect(result?.session_id).toBe(sample.session_id)
+    expect(usageEvents.length).toBe(0)
+  })
+
+  // The fresh-LLM path of `extractFacet` calls `generateObject` from the `ai`
+  // SDK (and may run additional `generateObject` calls for chunk summaries).
+  // Exercising it from a unit test requires a fake `LanguageModel` that
+  // satisfies the AI SDK's `LanguageModelV*` interface — non-trivial enough
+  // that we leave it as documented gaps rather than a flaky / over-mocked
+  // stub. The contract being asserted (per the inline doc on
+  // `ExtractFacetInput.onProgress`) is:
+  //   "Called exactly once per `extractFacet` invocation, after the facet
+  //    is resolved (whether from cache or from a fresh LLM call)."
+
+  test.todo("extractFacet on a successful fresh LLM call ticks onProgress exactly once", () => {})
+  test.todo("extractFacet on LLM failure still ticks onProgress exactly once and returns null", () => {})
+  test.todo("extractFacet emits onUsage once per LLM round-trip (1 facet + N chunk summaries)", () => {})
+})
+
+describe("generateSections onProgress wiring", () => {
+  // `generateSections` (src/insights/sections.ts) runs `generateObject` 7
+  // times via `Effect.forEach({ concurrency: 4 })`, calling `onProgress`
+  // inside `Effect.tap` after each section resolves. Same fake-LanguageModel
+  // blocker as the extractFacet tests above.
+
+  test.todo("generateSections ticks onProgress exactly 7 times (once per section)", () => {})
+  test.todo("generateSections emits 7 onUsage events with kind === 'section'", () => {})
+})
+
+describe("Insights.run RunResult shape", () => {
+  // End-to-end shape test for `Insights.run` (src/cli/cmd/insights.ts).
+  // Requires stubbing the LLM at module level (mock.module on `ai`) plus
+  // seeding a fake transcript on disk. Documented as a gap pending
+  // fake-LanguageModel infrastructure shared with the cases above.
+
+  test.todo("Insights.run RunResult shape: report path, sessions, cost, usage events", () => {})
 })
