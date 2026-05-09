@@ -10,6 +10,146 @@ const ESC_MAP: Record<string, string> = {
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ESC_MAP[c]!)
 
+/**
+ * Inline-markdown renderer for LLM-authored narrative text.
+ *
+ * Supports the small subset the section prompts actually request:
+ *   - `**bold**`           → <strong>
+ *   - `*italic*` / `_em_`  → <em>
+ *   - `` `code` ``         → <code>
+ *
+ * The order of operations matters: we HTML-escape the entire input first
+ * (so anything we don't transform stays safe), then unescape exactly the
+ * pairs we recognise back into tags. Code spans are processed before
+ * emphasis so backticks inside text don't get partially-italicised.
+ *
+ * Use this for short *single-line* narrative strings. For full markdown
+ * blocks (headings, lists, paragraphs) use `renderMarkdown` instead.
+ */
+function renderInline(s: string): string {
+  return esc(s)
+    .replace(/`([^`]+?)`/g, (_m, body: string) => `<code>${body}</code>`)
+    .replace(/\*\*([^*\n][^*\n]*?)\*\*/g, (_m, body: string) => `<strong>${body}</strong>`)
+    .replace(/(^|[\s(])\*([^*\n]+?)\*(?=$|[\s.,;:!?)])/g, (_m, lead: string, body: string) => `${lead}<em>${body}</em>`)
+    .replace(/(^|[\s(])_([^_\n]+?)_(?=$|[\s.,;:!?)])/g, (_m, lead: string, body: string) => `${lead}<em>${body}</em>`)
+}
+
+/**
+ * Block-level markdown renderer for fields the LLM may return as full
+ * documents (e.g. `suggestions.agents_md_additions[].addition`).
+ *
+ * Supports:
+ *   - fenced code blocks (```lang\n...\n```)        → <pre><code>...</code></pre>
+ *   - ATX headings (##, ###, ####)                  → <h3>/<h4>/<h5>
+ *     (`#` is downgraded to <h3> too — h1/h2 are reserved for the report
+ *      shell and section headers)
+ *   - unordered lists (-, *, +) including multi-line items joined by
+ *     continuation indent or single newline                → <ul><li>...</li></ul>
+ *   - ordered lists (1. 2. ...)                            → <ol><li>...</li></ol>
+ *   - blank-line-separated paragraphs                      → <p>
+ *
+ * Inline pass (bold/em/code) runs on every text fragment via `renderInline`.
+ *
+ * Not supported (kept simple on purpose): blockquotes, tables, nested lists,
+ * setext headings, inline HTML, links. The LLM prompts in `sections.ts`
+ * never ask for these.
+ */
+function renderMarkdown(input: string): string {
+  // 1. Pull fenced code blocks out first so their internals don't get
+  //    re-interpreted as headings / lists.
+  const codeBlocks: string[] = []
+  const stashed = input.replace(/```[a-zA-Z0-9_+-]*\n([\s\S]*?)```/g, (_m, body: string) => {
+    codeBlocks.push(body.replace(/\n$/, ""))
+    return `\u0000CODE${codeBlocks.length - 1}\u0000`
+  })
+
+  // 2. Split into blocks separated by blank lines.
+  const rawBlocks = stashed.split(/\n\s*\n+/).map((b) => b.replace(/^\n+|\n+$/g, ""))
+
+  const ulMarker = /^(\s*)([-*+])\s+(.*)$/
+  const olMarker = /^(\s*)(\d+)\.\s+(.*)$/
+  const headingMarker = /^(#{1,4})\s+(.+)$/
+
+  // Render a sequence of list lines (items + their continuations) into <ul>/<ol>.
+  const renderListLines = (lines: string[], isUL: boolean): string => {
+    const marker = isUL ? ulMarker : olMarker
+    const items: string[] = []
+    const current: string[] = []
+    const flush = () => {
+      if (current.length === 0) return
+      items.push(current.join(" ").trim())
+      current.length = 0
+    }
+    for (const line of lines) {
+      const m = marker.exec(line)
+      if (m) {
+        flush()
+        current.push(m[3]!)
+        continue
+      }
+      const trimmed = line.trim()
+      if (trimmed) current.push(trimmed)
+    }
+    flush()
+    const tag = isUL ? "ul" : "ol"
+    return `<${tag}>${items.map((it) => `<li>${renderInline(it)}</li>`).join("")}</${tag}>`
+  }
+
+  // Split a single block (no blank lines inside) into mini-segments by line
+  // type — headings, lists, paragraphs can interleave without blank-line
+  // separation in real-world LLM output.
+  const renderBlock = (block: string): string => {
+    if (!block) return ""
+
+    // Code-block placeholder?
+    const codeMatch = /^\u0000CODE(\d+)\u0000$/.exec(block)
+    if (codeMatch) {
+      const idx = Number(codeMatch[1])
+      return `<pre>${esc(codeBlocks[idx] ?? "")}</pre>`
+    }
+
+    const lines = block.split("\n")
+    const out: string[] = []
+    type Mode = "para" | "ul" | "ol"
+    const buf: { mode: Mode; lines: string[] } = { mode: "para", lines: [] }
+    const flushBuf = () => {
+      if (buf.lines.length === 0) return
+      if (buf.mode === "para") {
+        out.push(`<p>${renderInline(buf.lines.join("\n")).replace(/\n/g, "<br>")}</p>`)
+      } else {
+        out.push(renderListLines(buf.lines, buf.mode === "ul"))
+      }
+      buf.lines = []
+    }
+
+    for (const line of lines) {
+      // Heading line — flush, emit, reset to paragraph mode.
+      const hm = headingMarker.exec(line)
+      if (hm) {
+        flushBuf()
+        const level = Math.min(5, Math.max(3, hm[1]!.length + 2))
+        out.push(`<h${level}>${renderInline(hm[2]!)}</h${level}>`)
+        buf.mode = "para"
+        continue
+      }
+      const isUL = ulMarker.test(line)
+      const isOL = !isUL && olMarker.test(line)
+      const lineMode: Mode = isUL ? "ul" : isOL ? "ol" : "para"
+      // Mode change → flush previous group.
+      if (lineMode !== buf.mode && buf.lines.length > 0) flushBuf()
+      buf.mode = lineMode
+      // Skip lines that are pure whitespace (already trimmed by outer split,
+      // but inner lines may be empty).
+      if (lineMode === "para" && line.trim() === "" && buf.lines.length === 0) continue
+      buf.lines.push(line)
+    }
+    flushBuf()
+    return out.join("")
+  }
+
+  return rawBlocks.map(renderBlock).join("\n")
+}
+
 const LOGO_SVG = String.raw`
 <svg class="logo" viewBox="0 0 234 42" xmlns="http://www.w3.org/2000/svg" aria-label="opencode">
   <path class="fg-weak"   d="M18 30H6V18H18V30Z"/>
@@ -98,10 +238,17 @@ const CSS = String.raw`
   }
 
   /* Header / brand */
-  header.report-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; }
-  header.report-head .logo { height: 28px; width: auto; }
+  header.report-head { display: flex; align-items: center; gap: 1.25rem; margin-bottom: 2rem; }
+  header.report-head .logo {
+    height: 28px;
+    width: auto;
+    flex: 0 0 auto;       /* never shrink — text in the sibling can wrap freely */
+    align-self: flex-start;
+    margin-top: .25rem;
+  }
   header.report-head .logo .fg-strong { fill: var(--fg-strong); }
   header.report-head .logo .fg-weak   { fill: var(--fg-weaker); }
+  header.report-head .head-body { min-width: 0; }   /* allow flex-child to shrink + wrap */
   header.report-head .meta { color: var(--fg-weak); font-size: 13px; }
 
   h1, h2, h3, h4 { font-weight: 500; color: var(--fg-strong); line-height: 1.2; letter-spacing: -0.01em; }
@@ -115,17 +262,44 @@ const CSS = String.raw`
 
   .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 
-  /* Cards: flat, hairline border, no shadow */
+  /* Cards: flat, hairline border, no shadow.
+     '.card + .card' adds breathing room between consecutive cards (e.g.
+     multiple AGENTS.md additions stacked vertically). The grid layout (used
+     in "At a glance") already provides its own gap, so this only affects
+     stacked siblings. */
   .card {
     background: var(--bg-weak);
     border: 1px solid var(--border-weak);
     border-radius: 4px;
-    padding: .875rem 1rem;
+    padding: 1rem 1.25rem;
   }
+  /* Vertical breathing room ONLY between stacked sibling cards (e.g. multiple
+     AGENTS.md additions). Cards inside .grid (the "At a glance" tiles) are
+     already spaced via gap and must NOT get extra top-margin — that would
+     push the second-row cards down and make the first card look taller under
+     align-items: stretch. */
+  *:not(.grid) > .card + .card { margin-top: .75rem; }
+  /* Markdown lists inside a card need extra indent so ordered-list numbers
+     don't collide with the card's left padding. Same for paragraphs after
+     the muted intro line. */
+  .card ul, .card ol { padding-left: 1.75rem; margin: .5rem 0; }
+  .card > p { margin: .5rem 0; }
+  .card > h4, .card > h5 { margin-top: .75rem; }
+  .card > h4:first-child, .card > h5:first-child, .card > p:first-child { margin-top: 0; }
+  .card > .muted + h4, .card > .muted + h5, .card > .muted + p { margin-top: .75rem; }
   .stat { font-size: 1.6rem; font-weight: 500; color: var(--fg-strong); margin-top: .25rem; }
 
-  /* Bar rows: dark-fg fill on light bg, light-fg fill on dark bg */
-  .bar-row { display: grid; grid-template-columns: 18ch 1fr 8ch; align-items: center; gap: .75rem; margin: .35rem 0; font-size: 13px; }
+  /* Bar rows: dark-fg fill on light bg, light-fg fill on dark bg.
+     The label column has a hard min:0 + overflow ellipsis so long keys like
+     'security_audit_and_hardening' truncate inside their column rather than
+     spilling over the track. The full label stays available via title=. */
+  .bar-row { display: grid; grid-template-columns: minmax(0, 18ch) 1fr 8ch; align-items: center; gap: .75rem; margin: .35rem 0; font-size: 13px; }
+  .bar-row > .muted {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .bar-track { background: var(--bg-weak); border: 1px solid var(--border-weak); border-radius: 3px; height: 14px; overflow: hidden; }
   .bar { height: 100%; background: var(--accent); border-radius: 0; min-width: 2px; }
   .bar.warn { background: var(--warn); }
@@ -163,7 +337,11 @@ const CSS = String.raw`
     white-space: pre-wrap;
     font-size: 13px;
     line-height: 1.55;
+    margin: .5rem 0;
   }
+  /* Inside cards 'pre' already lives on a contrasting bg of its own; keep its
+     margin so consecutive prompt-scaffold + example_code blocks don't merge. */
+  .card pre + pre { margin-top: .5rem; }
 
   .pill {
     display: inline-block;
@@ -216,7 +394,8 @@ const renderBars = (entries: Pair[], limit: number): string => {
   return top
     .map(([label, value]) => {
       const pct = max > 0 ? Math.max(2, Math.round((value / max) * 100)) : 0
-      return `<div class="bar-row"><div class="muted">${esc(label)}</div><div class="bar-track"><div class="bar" style="width:${pct}%"></div></div><div>${value.toLocaleString()}</div></div>`
+      const safe = esc(label)
+      return `<div class="bar-row"><div class="muted" title="${safe}">${safe}</div><div class="bar-track"><div class="bar" style="width:${pct}%"></div></div><div>${value.toLocaleString()}</div></div>`
     })
     .join("")
 }
@@ -302,8 +481,8 @@ function renderInteractionStyle(s: NonNullable<Sections["interaction_style"]>): 
   return `
 <section>
   <h2>What makes your usage distinctive</h2>
-  <p>${esc(s.narrative)}</p>
-  ${s.key_pattern ? `<p><strong>${esc(s.key_pattern)}</strong></p>` : ""}
+  ${renderMarkdown(s.narrative)}
+  ${s.key_pattern ? `<p><strong>${renderInline(s.key_pattern)}</strong></p>` : ""}
 </section>`
 }
 
@@ -311,13 +490,13 @@ function renderWhatWorks(s: NonNullable<Sections["what_works"]>): string {
   const items =
     s.impressive_workflows.length > 0
       ? `<ul>${s.impressive_workflows
-          .map((w) => `<li><strong>${esc(w.title)}</strong> — ${esc(w.description)}</li>`)
+          .map((w) => `<li><strong>${renderInline(w.title)}</strong> — ${renderInline(w.description)}</li>`)
           .join("")}</ul>`
       : ""
   return `
 <section>
   <h2>What's working well</h2>
-  <p>${esc(s.intro)}</p>
+  ${renderMarkdown(s.intro)}
   ${items}
 </section>`
 }
@@ -329,38 +508,41 @@ function renderFriction(s: NonNullable<Sections["friction_analysis"]>): string {
           .map((c) => {
             const examples =
               c.examples.length > 0
-                ? `<ul>${c.examples.map((e) => `<li>${esc(e)}</li>`).join("")}</ul>`
+                ? `<ul>${c.examples.map((e) => `<li>${renderInline(e)}</li>`).join("")}</ul>`
                 : ""
-            return `<div class="card"><h3>${esc(c.category)}</h3><p>${esc(c.description)}</p>${examples}</div>`
+            return `<div class="card"><h3>${renderInline(c.category)}</h3>${renderMarkdown(c.description)}${examples}</div>`
           })
           .join("")
       : ""
   return `
 <section>
   <h2>What to change</h2>
-  <p>${esc(s.intro)}</p>
+  ${renderMarkdown(s.intro)}
   ${cats}
 </section>`
 }
 
 function renderSuggestions(s: NonNullable<Sections["suggestions"]>): string {
+  // `addition` is frequently a multi-line markdown block (e.g. "## Heading\n- item\n- item").
+  // `why` is shorter — keep as inline. `why_for_you` and `detail` are usually
+  // 1-2 paragraphs, so render as block markdown too.
   const agentsMd =
     s.agents_md_additions.length > 0
-      ? `<h3>AGENTS.md additions</h3><ul>${s.agents_md_additions
+      ? `<h3>AGENTS.md additions</h3>${s.agents_md_additions
           .map(
             (a) =>
-              `<li><p><strong>${esc(a.addition)}</strong> — ${esc(a.why)}</p>${
+              `<div class="card"><div class="muted">${renderInline(a.why)}</div>${renderMarkdown(a.addition)}${
                 a.prompt_scaffold ? `<pre>${esc(a.prompt_scaffold)}</pre>` : ""
-              }</li>`,
+              }</div>`,
           )
-          .join("")}</ul>`
+          .join("")}`
       : ""
   const features =
     s.features_to_try.length > 0
       ? `<h3>Features to try</h3><ul>${s.features_to_try
           .map(
             (f) =>
-              `<li><p><strong>${esc(f.feature)}</strong> — ${esc(f.one_liner)}</p><p class="muted">${esc(f.why_for_you)}</p>${
+              `<li><p><strong>${renderInline(f.feature)}</strong> — ${renderInline(f.one_liner)}</p><div class="muted">${renderMarkdown(f.why_for_you)}</div>${
                 f.example_code ? `<pre>${esc(f.example_code)}</pre>` : ""
               }</li>`,
           )
@@ -371,7 +553,7 @@ function renderSuggestions(s: NonNullable<Sections["suggestions"]>): string {
       ? `<h3>Usage patterns</h3><ul>${s.usage_patterns
           .map(
             (u) =>
-              `<li><p><strong>${esc(u.title)}</strong> — ${esc(u.suggestion)}</p><p>${esc(u.detail)}</p>${
+              `<li><p><strong>${renderInline(u.title)}</strong> — ${renderInline(u.suggestion)}</p>${renderMarkdown(u.detail)}${
                 u.copyable_prompt ? `<pre>${esc(u.copyable_prompt)}</pre>` : ""
               }</li>`,
           )
@@ -392,7 +574,7 @@ function renderHorizon(s: NonNullable<Sections["on_the_horizon"]>): string {
       ? `<ul>${s.opportunities
           .map(
             (o) =>
-              `<li><p><strong>${esc(o.title)}</strong></p><p>${esc(o.whats_possible)}</p><p class="muted">${esc(o.how_to_try)}</p>${
+              `<li><p><strong>${renderInline(o.title)}</strong></p>${renderMarkdown(o.whats_possible)}<div class="muted">${renderMarkdown(o.how_to_try)}</div>${
                 o.copyable_prompt ? `<pre>${esc(o.copyable_prompt)}</pre>` : ""
               }</li>`,
           )
@@ -401,7 +583,7 @@ function renderHorizon(s: NonNullable<Sections["on_the_horizon"]>): string {
   return `
 <section>
   <h2>On the horizon</h2>
-  <p>${esc(s.intro)}</p>
+  ${renderMarkdown(s.intro)}
   ${items}
 </section>`
 }
@@ -410,7 +592,7 @@ function renderFunEnding(s: NonNullable<Sections["fun_ending"]>): string {
   return `
 <section>
   <h2>Memorable moment</h2>
-  <div class="banner"><h3>${esc(s.headline)}</h3><p>${esc(s.detail)}</p></div>
+  <div class="banner"><h3>${renderInline(s.headline)}</h3>${renderMarkdown(s.detail)}</div>
 </section>`
 }
 
@@ -431,7 +613,7 @@ function renderArchive(a: Aggregate): string {
               .map((s) => {
                 const outcome = s.outcome ? ` <span class="muted">— ${esc(s.outcome)}</span>` : ""
                 const goal = s.goal ? ` <span class="muted">(${esc(s.goal)})</span>` : ""
-                return `<li><code>${esc(s.id)}</code> · ${esc(s.started_iso)}${goal}: ${esc(s.summary)}${outcome}</li>`
+                return `<li><code>${esc(s.id)}</code> · ${esc(s.started_iso)}${goal}: ${renderInline(s.summary)}${outcome}</li>`
               })
               .join("")
             return `<div class="archive-group"><h4>${esc(projectPath)} <span class="muted">(${sessions.length})</span></h4><ul class="archive-list">${items}</ul></div>`
@@ -470,10 +652,10 @@ export function renderReport(input: RenderInput): string {
 </head><body>
 <header class="report-head">
   ${LOGO_SVG}
-  <div>
+  <div class="head-body">
     <h1>Your Usage Report</h1>
     <p class="meta">${esc(dateRange)} · ${a.total_sessions.toLocaleString()} sessions · generated ${esc(input.generated_at_iso)}</p>
-    ${personality ? `<p><strong>${esc(personality)}</strong></p>` : ""}
+    ${personality ? `<p>${renderInline(personality)}</p>` : ""}
   </div>
 </header>
 ${renderAtAGlance(a)}

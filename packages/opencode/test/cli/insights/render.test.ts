@@ -65,4 +65,107 @@ describe("renderReport", () => {
     expect(html).toContain("IBM Plex Mono")
     expect(html).toContain('aria-label="opencode"')
   })
+
+  test("converts inline **bold** markdown into <strong> in narrative fields", () => {
+    const sections: Sections = {
+      interaction_style: {
+        narrative: "You are **highly methodical** and *iterative*.",
+        key_pattern: "**Verification-driven** approach",
+      },
+      fun_ending: { headline: "**Fun headline**", detail: "Detail with `code` inside." },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<strong>highly methodical</strong>")
+    expect(html).toContain("<em>iterative</em>")
+    expect(html).toContain("<strong>Verification-driven</strong>")
+    expect(html).toContain("<strong>Fun headline</strong>")
+    expect(html).toContain("<code>code</code>")
+    expect(html).not.toContain("**highly methodical**")
+    expect(html).not.toContain("**Verification-driven**")
+  })
+
+  test("logo header keeps the SVG from being squeezed (flex-shrink:0)", () => {
+    const html = renderReport({ aggregate: baseAggregate, sections: {}, generated_at_iso: "x" })
+    expect(html).toContain("flex: 0 0 auto")
+    expect(html).toContain('class="head-body"')
+  })
+
+  test("escapes HTML inside markdown payload (no XSS)", () => {
+    const sections: Sections = {
+      interaction_style: { narrative: "**<script>alert(1)</script>**", key_pattern: "" },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).not.toContain("<script>alert(1)</script>")
+    expect(html).toContain("<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>")
+  })
+
+  test("renders block markdown: headings, lists, paragraphs in agents_md_additions", () => {
+    const sections: Sections = {
+      suggestions: {
+        agents_md_additions: [
+          {
+            addition: "## Frequently Given Instructions\n\n### Document Rewriting\n\nWhen you see X, follow:\n- Load skill\n- Extract content\n- Verify",
+            why: "User asked 40+ times.",
+            prompt_scaffold: "",
+          },
+        ],
+        features_to_try: [],
+        usage_patterns: [],
+      },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    // headings preserved (## → h4 since # → h3)
+    expect(html).toMatch(/<h4>Frequently Given Instructions<\/h4>/)
+    expect(html).toMatch(/<h5>Document Rewriting<\/h5>/)
+    // bullet list
+    expect(html).toContain("<ul><li>Load skill</li><li>Extract content</li><li>Verify</li></ul>")
+    // paragraph between headings and list
+    expect(html).toContain("<p>When you see X, follow:</p>")
+    // raw markdown markers no longer present
+    expect(html).not.toMatch(/^##\s/m)
+    expect(html).not.toMatch(/^- /m)
+  })
+
+  test("renders fenced code blocks with HTML-escaped contents", () => {
+    const sections: Sections = {
+      suggestions: {
+        agents_md_additions: [
+          { addition: "Here is config:\n\n```json\n{\"foo\": \"<bar>\"}\n```", why: "", prompt_scaffold: "" },
+        ],
+        features_to_try: [],
+        usage_patterns: [],
+      },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<pre>")
+    expect(html).toContain("&lt;bar&gt;")
+    expect(html).not.toContain("<bar>")
+    expect(html).not.toContain("```")
+  })
+
+  test("renders multi-paragraph narrative with blank-line separation", () => {
+    const sections: Sections = {
+      interaction_style: {
+        narrative: "First paragraph here.\n\nSecond paragraph **bold** word.",
+        key_pattern: "",
+      },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<p>First paragraph here.</p>")
+    expect(html).toContain("<p>Second paragraph <strong>bold</strong> word.</p>")
+  })
+
+  test("ordered lists become <ol>", () => {
+    const sections: Sections = {
+      suggestions: {
+        agents_md_additions: [
+          { addition: "Steps:\n\n1. Do A\n2. Do B\n3. Do C", why: "", prompt_scaffold: "" },
+        ],
+        features_to_try: [],
+        usage_patterns: [],
+      },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<ol><li>Do A</li><li>Do B</li><li>Do C</li></ol>")
+  })
 })

@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import { generateObject, type LanguageModel } from "ai"
 import type { ZodType } from "zod"
+import type { UsageEvent } from "./facets"
 import {
   ProjectAreasSection,
   InteractionStyleSection,
@@ -99,7 +100,23 @@ const SECTIONS: SectionDef<unknown>[] = [
   },
 ]
 
-export const generateSections = (input: { model: LanguageModel; aggregate: Aggregate; facets: SessionFacets[] }) =>
+export interface GenerateSectionsInput {
+  model: LanguageModel
+  aggregate: Aggregate
+  facets: SessionFacets[]
+  /**
+   * Called once per section as soon as that section's `generateObject`
+   * resolves (success or fallback). Total invocations equals `SECTIONS.length`.
+   */
+  onProgress?: () => void
+  /**
+   * Called once per successful section LLM call (not on failures). Lets the
+   * CLI sum real cost/tokens for the post-run summary.
+   */
+  onUsage?: (e: UsageEvent) => void
+}
+
+export const generateSections = (input: GenerateSectionsInput) =>
   Effect.fn("Insights.generateSections")(function* () {
     const results = yield* Effect.forEach(
       SECTIONS,
@@ -111,13 +128,17 @@ export const generateSections = (input: { model: LanguageModel; aggregate: Aggre
               schema: section.schema,
               prompt: section.prompt(input.aggregate, input.facets),
               maxOutputTokens: section.maxTokens,
-            }).then((r) => ({ name: section.name, value: r.object as unknown })),
+            }).then((r) => {
+              input.onUsage?.({ usage: r.usage, metadata: r.providerMetadata, kind: "section" })
+              return { name: section.name, value: r.object as unknown }
+            }),
           catch: (e) => new Error(`section ${section.name} failed: ${String(e)}`),
         }).pipe(
           Effect.orElseSucceed(() => ({
             name: section.name,
             value: undefined as unknown,
           })),
+          Effect.tap(() => Effect.sync(() => input.onProgress?.())),
         ),
       { concurrency: 4 },
     )

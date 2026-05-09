@@ -55,6 +55,49 @@ export const SessionFacets = z.object({
 })
 export type SessionFacets = z.infer<typeof SessionFacets>
 
+// Wire-format for LLM `generateObject` calls. Mirrors `SessionFacets` but
+// expresses every `Record<string, number>` field as an array of `{key, value}`
+// pairs because `z.record` translates to JSON Schema with `propertyNames` +
+// `additionalProperties: false` — which Anthropic and other providers reject
+// as malformed (the schema accepts no keys). Arrays serialise cleanly on every
+// provider we target. Convert with `fromSessionFacetsInput` before use.
+const KeyNumber = z.array(z.object({ key: z.string(), value: z.number() }))
+
+export const SessionFacetsInput = z.object({
+  underlying_goal: z.string(),
+  goal_categories: KeyNumber,
+  outcome: z.enum(["fully_achieved", "mostly_achieved", "partially_achieved", "not_achieved", "unclear_from_transcript"]),
+  user_satisfaction_counts: KeyNumber,
+  claude_helpfulness: z.enum(["unhelpful", "slightly_helpful", "moderately_helpful", "very_helpful", "essential"]),
+  session_type: z.enum(["single_task", "multi_task", "iterative_refinement", "exploration", "quick_question"]),
+  friction_counts: KeyNumber,
+  friction_detail: z.string(),
+  primary_success: z.string(),
+  brief_summary: z.string(),
+  user_instructions_to_claude: z.array(z.string()).optional(),
+})
+export type SessionFacetsInput = z.infer<typeof SessionFacetsInput>
+
+const kvToRecord = (pairs: Array<{ key: string; value: number }>): Record<string, number> =>
+  Object.fromEntries(pairs.map((p) => [p.key, p.value]))
+
+export function fromSessionFacetsInput(session_id: string, input: SessionFacetsInput): SessionFacets {
+  return {
+    session_id,
+    underlying_goal: input.underlying_goal,
+    goal_categories: kvToRecord(input.goal_categories),
+    outcome: input.outcome,
+    user_satisfaction_counts: kvToRecord(input.user_satisfaction_counts),
+    claude_helpfulness: input.claude_helpfulness,
+    session_type: input.session_type,
+    friction_counts: kvToRecord(input.friction_counts),
+    friction_detail: input.friction_detail,
+    primary_success: input.primary_success,
+    brief_summary: input.brief_summary,
+    user_instructions_to_claude: input.user_instructions_to_claude,
+  }
+}
+
 export const MultiClauding = z.object({
   overlap_events: z.number(),
   sessions_involved: z.number(),

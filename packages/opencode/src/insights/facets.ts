@@ -1,11 +1,22 @@
 import { Effect } from "effect"
-import { generateObject, type LanguageModel } from "ai"
+import { generateObject, type LanguageModel, type LanguageModelUsage, type ProviderMetadata } from "ai"
+import { z } from "zod"
 import path from "node:path"
 import { mkdir } from "node:fs/promises"
 import { facetsDir } from "./paths"
-import { SessionFacets, type SessionMeta } from "./schema"
+import { SessionFacets, SessionFacetsInput, fromSessionFacetsInput, type SessionMeta } from "./schema"
 import { formatTranscript, chunkTranscript } from "./transcript"
 import type { MessageV2 } from "@/session/message-v2"
+
+/**
+ * Reported once per LLM call (facet extraction or chunk summary), so the CLI
+ * can sum up real cost / token counts after the run.
+ */
+export interface UsageEvent {
+  usage: LanguageModelUsage
+  metadata?: ProviderMetadata
+  kind: "facet" | "chunk_summary" | "section"
+}
 
 const SUMMARIZE_CHUNK_PROMPT = `Summarize this portion of an OpenCode session transcript. Focus on:
 1. What the user asked for
@@ -49,13 +60,18 @@ export async function saveCachedFacet(facet: SessionFacets, end_time: number): P
   await Bun.write(cachePath(facet.session_id), JSON.stringify({ _end_time: end_time, facets: facet }, null, 2))
 }
 
-async function summariseChunk(model: LanguageModel, chunk: string): Promise<string> {
+async function summariseChunk(
+  model: LanguageModel,
+  chunk: string,
+  onUsage?: (e: UsageEvent) => void,
+): Promise<string> {
   const result = await generateObject({
     model,
-    schema: SessionFacets.pick({ brief_summary: true }),
+    schema: z.object({ brief_summary: z.string() }),
     prompt: SUMMARIZE_CHUNK_PROMPT + chunk,
     maxOutputTokens: 500,
   })
+  onUsage?.({ usage: result.usage, metadata: result.providerMetadata, kind: "chunk_summary" })
   return result.object.brief_summary
 }
 
@@ -63,10 +79,11 @@ async function compactTranscript(
   model: LanguageModel,
   meta: SessionMeta,
   transcript: string,
+  onUsage?: (e: UsageEvent) => void,
 ): Promise<string> {
   const chunks = chunkTranscript(transcript)
   if (chunks.length === 1) return transcript
-  const summaries = await Promise.all(chunks.map((c) => summariseChunk(model, c)))
+  const summaries = await Promise.all(chunks.map((c) => summariseChunk(model, c, onUsage)))
   const header = [
     `Session: ${meta.session_id.slice(0, 8)}`,
     `Date: ${new Date(meta.start_time).toISOString()}`,
@@ -82,27 +99,60 @@ export interface ExtractFacetInput {
   meta: SessionMeta
   messages: MessageV2.WithParts[]
   model: LanguageModel
+  /**
+   * Called exactly once per `extractFacet` invocation, after the facet is
+   * resolved (whether from cache or from a fresh LLM call). Lets the CLI
+   * draw a progress bar over `sessions + sections` total calls.
+   */
+  onProgress?: () => void
+  /**
+   * Called once per actual LLM round-trip (facet + each chunk summary).
+   * Cache hits do NOT emit a usage event. Use this to sum real cost/tokens
+   * for the post-run summary.
+   */
+  onUsage?: (e: UsageEvent) => void
 }
 
 export const extractFacet = (input: ExtractFacetInput) =>
   Effect.fn("Insights.extractFacet")(function* () {
     const cached = yield* Effect.promise(() => loadCachedFacet(input.meta.session_id, input.meta.end_time))
-    if (cached) return cached
+    if (cached) {
+      input.onProgress?.()
+      return cached as SessionFacets | null
+    }
 
     const transcript = formatTranscript(input.meta, input.messages)
-    const compacted = yield* Effect.promise(() => compactTranscript(input.model, input.meta, transcript))
+    // `compactTranscript` itself runs LLM `summariseChunk` calls under the hood
+    // which can fail on malformed responses; isolate them so a single bad
+    // session doesn't kill the whole pipeline.
+    const compacted = yield* Effect.tryPromise({
+      try: () => compactTranscript(input.model, input.meta, transcript, input.onUsage),
+      catch: (e) => new Error(`compact ${input.meta.session_id}: ${String(e)}`),
+    }).pipe(Effect.orElseSucceed(() => null))
 
-    const result = yield* Effect.promise(() =>
-      generateObject({
-        model: input.model,
-        schema: SessionFacets.omit({ session_id: true }),
-        prompt: FACET_EXTRACTION_PROMPT + compacted,
-        maxOutputTokens: 4096,
-      }),
-    )
-    const facet: SessionFacets = { ...result.object, session_id: input.meta.session_id }
-    yield* Effect.promise(() => saveCachedFacet(facet, input.meta.end_time))
-    return facet
+    if (compacted === null) {
+      input.onProgress?.()
+      return null
+    }
+
+    const facetOrNull = yield* Effect.tryPromise({
+      try: async () => {
+        const result = await generateObject({
+          model: input.model,
+          schema: SessionFacetsInput,
+          prompt: FACET_EXTRACTION_PROMPT + compacted,
+          maxOutputTokens: 4096,
+        })
+        input.onUsage?.({ usage: result.usage, metadata: result.providerMetadata, kind: "facet" })
+        const facet = fromSessionFacetsInput(input.meta.session_id, result.object)
+        await saveCachedFacet(facet, input.meta.end_time)
+        return facet
+      },
+      catch: (e) => new Error(`facet ${input.meta.session_id}: ${String(e)}`),
+    }).pipe(Effect.orElseSucceed(() => null))
+
+    input.onProgress?.()
+    return facetOrNull
   })()
 
 export * as InsightsFacets from "./facets"

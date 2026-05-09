@@ -19,4 +19,18 @@ export const resolveLanguageModel = Effect.fn("Insights.resolveLanguageModel")(f
   return yield* provider.getLanguage(model)
 })
 
+/**
+ * Resolve the `Provider.Model` metadata record (the one that carries the
+ * `cost: { input, output, cache }` per-1M-token rates and the human-readable
+ * `providerID`/`id`). Used by the CLI to compute a pre-call USD estimate.
+ *
+ * Same selection rules as `resolveLanguageModel`: explicit `providerID/modelID`
+ * if given, otherwise the configured default.
+ */
+export const resolveModelMetadata = Effect.fn("Insights.resolveModelMetadata")(function* (input?: string) {
+  const provider = yield* Provider.Service
+  const selection = input ? Provider.parseModel(input) : yield* provider.defaultModel()
+  return yield* provider.getModel(selection.providerID, selection.modelID)
+})
+
 export * as InsightsModel from "./model"
