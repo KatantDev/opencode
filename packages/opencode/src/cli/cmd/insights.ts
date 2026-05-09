@@ -41,14 +41,16 @@ export const InsightsCommand = effectCmd({
       ? yield* resolveLanguageModel(args.model).pipe(
           Effect.catchDefect((e) => {
             const msg = e instanceof Error ? e.message : String(e)
-            if (msg.includes("ProviderModelNotFoundError")) {
-              return fail(
-                args.model
-                  ? `Model not found: ${args.model}. Run 'opencode models' to list available models.`
-                  : `No default model configured. Pass --model provider/model or set 'model' in config.`,
-              )
-            }
-            return Effect.die(e)
+            const isModelMissing =
+              msg.includes("ProviderModelNotFoundError") ||
+              msg.includes("no models found") ||
+              msg.includes("no providers found")
+            if (!isModelMissing) return Effect.die(e)
+            return fail(
+              args.model
+                ? `Model not found: ${args.model}. Run 'opencode models' to list available models.`
+                : `No default model configured. Pass --model provider/model or set 'model' in config.`,
+            )
           }),
         )
       : undefined
