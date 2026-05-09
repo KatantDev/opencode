@@ -59,4 +59,10 @@ describe("renderReport", () => {
     const html = renderReport({ aggregate: baseAggregate, sections: {}, generated_at_iso: "x" })
     expect(html.toLowerCase().includes("memorable")).toBe(false)
   })
+
+  test("inlines the IBM Plex Mono font and OpenCode logo", () => {
+    const html = renderReport({ aggregate: baseAggregate, sections: {}, generated_at_iso: "x" })
+    expect(html).toContain("IBM Plex Mono")
+    expect(html).toContain('aria-label="opencode"')
+  })
 })

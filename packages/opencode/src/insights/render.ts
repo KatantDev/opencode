@@ -10,39 +10,192 @@ const ESC_MAP: Record<string, string> = {
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ESC_MAP[c]!)
 
+const LOGO_SVG = String.raw`
+<svg class="logo" viewBox="0 0 234 42" xmlns="http://www.w3.org/2000/svg" aria-label="opencode">
+  <path class="fg-weak"   d="M18 30H6V18H18V30Z"/>
+  <path class="fg-strong" d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z"/>
+  <path class="fg-weak"   d="M48 30H36V18H48V30Z"/>
+  <path class="fg-strong" d="M36 30H48V12H36V30ZM54 36H36V42H30V6H54V36Z"/>
+  <path class="fg-weak"   d="M84 24V30H66V24H84Z"/>
+  <path class="fg-strong" d="M84 24H66V30H84V36H60V6H84V24ZM66 18H78V12H66V18Z"/>
+  <path class="fg-weak"   d="M108 36H96V18H108V36Z"/>
+  <path class="fg-strong" d="M108 12H96V36H90V6H108V12ZM114 36H108V12H114V36Z"/>
+  <path class="fg-weak"   d="M144 30H126V18H144V30Z"/>
+  <path class="fg-strong" d="M144 12H126V30H144V36H120V6H144V12Z"/>
+  <path class="fg-weak"   d="M168 30H156V18H168V30Z"/>
+  <path class="fg-strong" d="M168 12H156V30H168V12ZM174 36H150V6H174V36Z"/>
+  <path class="fg-weak"   d="M198 30H186V18H198V30Z"/>
+  <path class="fg-strong" d="M198 12H186V30H198V12ZM204 36H180V6H198V0H204V36Z"/>
+  <path class="fg-weak"   d="M234 24V30H216V24H234Z"/>
+  <path class="fg-strong" d="M216 12V18H228V12H216ZM234 24H216V30H234V36H210V6H234V24Z"/>
+</svg>`
+
 const CSS = String.raw`
-  :root { color-scheme: light dark; --accent: #6366f1; --good: #10b981; --warn: #f59e0b; --bg: #fff; --fg: #111; --muted: #555; --card: #f7f7f8; --border: #e5e7eb; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #0b0d12; --fg: #e5e7eb; --muted: #9ca3af; --card: #11141b; --border: #1f2937; }
+  /* OpenCode share/docs design tokens (light) */
+  :root {
+    color-scheme: light dark;
+
+    --bg:               hsl(0, 20%, 99%);
+    --bg-weak:          hsl(0, 8%, 97%);
+    --bg-weak-hover:    hsl(0, 8%, 94%);
+    --bg-strong:        hsl(0, 5%, 12%);
+    --bg-interactive:   hsl(62, 84%, 88%);
+
+    --fg:               hsl(0, 1%, 39%);
+    --fg-weak:          hsl(0, 1%, 60%);
+    --fg-weaker:        hsl(0, 3%, 88%);
+    --fg-strong:        hsl(0, 5%, 12%);
+
+    --border:           hsl(30, 2%, 81%);
+    --border-weak:      hsl(0, 1%, 85%);
+
+    /* semantic (synthesized to fit the warm palette) */
+    --accent:           hsl(0, 5%, 12%);
+    --accent-soft:      hsl(62, 84%, 88%);
+    --good:             hsl(140, 45%, 38%);
+    --warn:             hsl(28,  85%, 48%);
+    --danger:           hsl(8,   78%, 52%);
+
+    --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   }
-  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 920px; margin: 2rem auto; padding: 0 1rem; background: var(--bg); color: var(--fg); line-height: 1.55; }
-  h1, h2, h3 { line-height: 1.2; }
-  h1 { font-size: 2rem; margin: 0 0 .25rem 0; }
-  h2 { margin-top: 2.25rem; padding-bottom: .25rem; border-bottom: 1px solid var(--border); }
-  h3 { margin-top: 1.25rem; }
-  .muted { color: var(--muted); }
-  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
-  .stat { font-size: 1.6rem; font-weight: 600; }
-  .bar-row { display: grid; grid-template-columns: 16ch 1fr 8ch; align-items: center; gap: .5rem; margin: .25rem 0; }
-  .bar-track { background: var(--card); border-radius: 3px; height: 14px; overflow: hidden; }
-  .bar { height: 14px; background: var(--accent); border-radius: 3px; min-width: 2px; }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:             hsl(0, 9%, 7%);
+      --bg-weak:        hsl(0, 6%, 10%);
+      --bg-weak-hover:  hsl(0, 6%, 14%);
+      --bg-strong:      hsl(0, 15%, 94%);
+      --bg-interactive: hsl(62, 100%, 90%);
+
+      --fg:             hsl(0, 4%, 71%);
+      --fg-weak:        hsl(0, 2%, 49%);
+      --fg-weaker:      hsl(0, 3%, 28%);
+      --fg-strong:      hsl(0, 15%, 94%);
+
+      --border:         hsl(0, 3%, 28%);
+      --border-weak:    hsl(0, 4%, 23%);
+
+      --accent:         hsl(0, 15%, 94%);
+      --accent-soft:    hsl(62, 100%, 90%);
+      --good:           hsl(140, 45%, 60%);
+      --warn:           hsl(38,  90%, 60%);
+      --danger:         hsl(8,   78%, 64%);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1.6875;
+    background: var(--bg);
+    color: var(--fg);
+    max-width: 960px;
+    margin: 2.5rem auto;
+    padding: 0 1.5rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Header / brand */
+  header.report-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; }
+  header.report-head .logo { height: 28px; width: auto; }
+  header.report-head .logo .fg-strong { fill: var(--fg-strong); }
+  header.report-head .logo .fg-weak   { fill: var(--fg-weaker); }
+  header.report-head .meta { color: var(--fg-weak); font-size: 13px; }
+
+  h1, h2, h3, h4 { font-weight: 500; color: var(--fg-strong); line-height: 1.2; letter-spacing: -0.01em; }
+  h1 { font-size: 26px; margin: 0 0 .25rem 0; }
+  h2 { font-size: 22px; margin: 2.5rem 0 1rem 0; padding-bottom: .5rem; border-bottom: 1px solid var(--border-weak); }
+  h3 { font-size: 18px; margin: 1.5rem 0 .5rem 0; }
+  h4 { font-size: 16px; margin: 1rem 0 .25rem 0; }
+  strong { font-weight: 500; color: var(--fg-strong); }
+
+  .muted { color: var(--fg-weak); }
+
+  .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+
+  /* Cards: flat, hairline border, no shadow */
+  .card {
+    background: var(--bg-weak);
+    border: 1px solid var(--border-weak);
+    border-radius: 4px;
+    padding: .875rem 1rem;
+  }
+  .stat { font-size: 1.6rem; font-weight: 500; color: var(--fg-strong); margin-top: .25rem; }
+
+  /* Bar rows: dark-fg fill on light bg, light-fg fill on dark bg */
+  .bar-row { display: grid; grid-template-columns: 18ch 1fr 8ch; align-items: center; gap: .75rem; margin: .35rem 0; font-size: 13px; }
+  .bar-track { background: var(--bg-weak); border: 1px solid var(--border-weak); border-radius: 3px; height: 14px; overflow: hidden; }
+  .bar { height: 100%; background: var(--accent); border-radius: 0; min-width: 2px; }
   .bar.warn { background: var(--warn); }
+  .bar.good { background: var(--good); }
+
+  /* Hour histogram: brand "interactive" yellow-green */
   .hours { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; align-items: end; height: 80px; margin: .5rem 0; }
-  .hours .h { background: var(--accent); border-radius: 2px 2px 0 0; min-height: 1px; }
-  .hours-labels { display: grid; grid-template-columns: repeat(24, 1fr); font-size: 10px; color: var(--muted); text-align: center; }
-  details > summary { cursor: pointer; padding: .5rem 0; font-weight: 600; }
-  ul { padding-left: 1.25rem; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--border); }
-  pre { background: var(--card); padding: .75rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
-  .pill { display: inline-block; padding: .15rem .5rem; border-radius: 999px; background: var(--card); border: 1px solid var(--border); font-size: .8rem; margin: .15rem .15rem 0 0; }
-  .ok { color: var(--good); }
-  .warn { color: var(--warn); }
-  .banner { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; }
+  .hours .h { background: var(--accent-soft); border: 1px solid var(--border-weak); border-radius: 0; min-height: 1px; }
+  .hours-labels { display: grid; grid-template-columns: repeat(24, 1fr); font-size: 11px; color: var(--fg-weak); text-align: center; }
+
+  details > summary {
+    cursor: pointer;
+    padding: .5rem 0;
+    font-weight: 500;
+    color: var(--fg-strong);
+    list-style: none;
+  }
+  details > summary::before { content: "▸ "; color: var(--fg-weak); }
+  details[open] > summary::before { content: "▾ "; }
+
+  ul, ol { padding-left: 1.25rem; }
+  li { margin: .125rem 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--border-weak); }
+  th { font-weight: 500; color: var(--fg-strong); }
+
+  pre, code { font-family: var(--font-mono); }
+  pre {
+    background: var(--bg-weak);
+    border: 1px solid var(--border-weak);
+    padding: .75rem 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .pill {
+    display: inline-block;
+    padding: .15rem .55rem;
+    border-radius: 999px;
+    background: var(--bg-weak);
+    border: 1px solid var(--border-weak);
+    color: var(--fg);
+    font-size: 12px;
+    margin: .15rem .15rem 0 0;
+  }
+  .pill.accent { background: var(--bg-interactive); border-color: transparent; color: var(--fg-strong); }
+
+  .ok    { color: var(--good); }
+  .warn  { color: var(--warn); }
+  .danger{ color: var(--danger); }
+
+  .banner {
+    background: var(--bg-weak);
+    border: 1px solid var(--border-weak);
+    border-left: 2px solid var(--bg-strong);
+    border-radius: 4px;
+    padding: 1rem 1.25rem;
+  }
+
   .archive-group { margin: .5rem 0 1rem 0; }
-  .archive-group h4 { margin: .5rem 0 .25rem 0; font-size: .95rem; }
+  .archive-group h4 { margin: .5rem 0 .25rem 0; font-size: 14px; }
   .archive-list { margin: 0; padding-left: 1.25rem; }
+
+  hr { border: none; border-top: 1px solid var(--border-weak); margin: 2rem 0; }
+
+  a { color: var(--fg-strong); text-underline-offset: 3px; }
 `
 
 type Pair = readonly [string, number]
@@ -309,13 +462,19 @@ export function renderReport(input: RenderInput): string {
   const personality = input.sections.interaction_style?.key_pattern ?? ""
   return `<!doctype html>
 <html lang="en"><head>
-<meta charset="utf-8"><title>OpenCode — Your Usage Report</title>
+<meta charset="utf-8">
+<title>OpenCode — Your Usage Report</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>${CSS}</style>
 </head><body>
-<header>
-  <h1>OpenCode — Your Usage Report</h1>
-  <p class="muted">${esc(dateRange)} · ${a.total_sessions.toLocaleString()} sessions · generated ${esc(input.generated_at_iso)}</p>
-  ${personality ? `<p><strong>${esc(personality)}</strong></p>` : ""}
+<header class="report-head">
+  ${LOGO_SVG}
+  <div>
+    <h1>Your Usage Report</h1>
+    <p class="meta">${esc(dateRange)} · ${a.total_sessions.toLocaleString()} sessions · generated ${esc(input.generated_at_iso)}</p>
+    ${personality ? `<p><strong>${esc(personality)}</strong></p>` : ""}
+  </div>
 </header>
 ${renderAtAGlance(a)}
 ${renderHowYouUse(a)}
