@@ -25,18 +25,26 @@ interface ProgressReporter {
  *
  * Also disables stdin echo for the duration of the bar so stray arrow-key
  * presses don't leak escape sequences (`^[[C^[[D`) into the bar line.
+ *
+ * TTY side-effects (cursor hide, stdin raw-mode + pause) are deferred until
+ * the first `report()` call so the reporter can be constructed before an
+ * interactive confirm prompt without breaking it. Constructing the reporter
+ * up-front would otherwise pause stdin and mute the cursor while clack's
+ * `confirm()` is waiting for keypresses.
  */
 function makeProgressReporter(): ProgressReporter {
   const tty = process.stderr.isTTY
-  const state = { last: -1, restoreStdin: false }
-  if (tty) {
+  const state = { last: -1, initialized: false, restoreStdin: false }
+
+  const initOnce = () => {
+    if (state.initialized || !tty) return
+    state.initialized = true
     process.stderr.write("\x1b[?25l") // hide cursor
     // Disable terminal echo on stdin so accidental keypresses (arrow keys,
     // enter, etc.) don't print escape codes over the bar. We intentionally
-    // do NOT touch raw mode — we want Ctrl-C to keep working normally.
+    // pair setRawMode with pause() so stdin bytes are consumed silently
+    // rather than queued for the parent shell.
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-      // setRawMode also suppresses echo. Pair it with `pause()` so stdin
-      // bytes are consumed silently rather than queued for the parent shell.
       process.stdin.setRawMode(true)
       process.stdin.pause()
       state.restoreStdin = true
@@ -44,6 +52,7 @@ function makeProgressReporter(): ProgressReporter {
   }
 
   const report = (e: ProgressEvent) => {
+    initOnce()
     const percent = e.total > 0 ? Math.floor((e.current / e.total) * 100) : 0
     const final = e.total > 0 && e.current === e.total
     if (percent === state.last && !final) return
@@ -63,7 +72,7 @@ function makeProgressReporter(): ProgressReporter {
   }
 
   const finish = () => {
-    if (tty) process.stderr.write("\x1b[?25h") // show cursor
+    if (tty && state.initialized) process.stderr.write("\x1b[?25h") // show cursor
     if (state.restoreStdin && typeof process.stdin.setRawMode === "function") {
       process.stdin.setRawMode(false)
       process.stdin.resume()
@@ -86,11 +95,29 @@ function formatSeconds(s: number): string {
   return rem === 0 ? `~${m}m` : `~${m}m ${rem}s`
 }
 
+/**
+ * Bounded `Promise.all` — runs `fn` over `items` with at most `limit`
+ * concurrent invocations. Used to keep file-handle usage sane on machines
+ * with low ulimits (macOS defaults to 256) when probing the facet cache
+ * across thousands of sessions.
+ */
+async function pMap<T, U>(items: T[], limit: number, fn: (t: T) => Promise<U>): Promise<U[]> {
+  const out: U[] = new Array(items.length)
+  const queue = items.entries()
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (const [i, item] of queue) out[i] = await fn(item)
+  })
+  await Promise.all(workers)
+  return out
+}
+
 async function detectCachedFacets(metas: SessionMeta[]): Promise<Set<string>> {
-  // Probe the on-disk facet cache for every meta in parallel. A hit means
-  // `extractFacet` will skip the LLM call and the chunk-summary calls.
-  const hits = await Promise.all(
-    metas.map(async (m) => ((await loadCachedFacet(m.session_id, m.end_time)) ? m.session_id : null)),
+  // Probe the on-disk facet cache. A hit means `extractFacet` will skip the
+  // LLM call and the chunk-summary calls. Concurrency is capped at 20 to
+  // avoid EMFILE on machines with low file-descriptor limits when the user
+  // has thousands of sessions.
+  const hits = await pMap(metas, 20, async (m) =>
+    (await loadCachedFacet(m.session_id, m.end_time)) ? m.session_id : null,
   )
   return new Set(hits.filter((id): id is string => id !== null))
 }
@@ -119,7 +146,8 @@ function printRunSummary(r: RunResult, modelLabel: string): void {
   ]
     .filter((s): s is string => s !== null)
     .join(" + ")
-  const cacheLine = r.cachedFacets > 0 ? [`  Cache hits:   ${r.cachedFacets} facet${r.cachedFacets === 1 ? "" : "s"}`] : []
+  const cacheLine =
+    r.cachedFacets > 0 ? [`  Cached facets: ${r.cachedFacets} (skipped, $0)`] : []
   const lines = [
     "",
     "Run summary:",
@@ -233,6 +261,13 @@ export const InsightsCommand = effectCmd({
     const onBeforeLLM = withLLM
       ? async (metas: SessionMeta[]): Promise<boolean> => {
           if (!metadata) return false
+          if (metas.length === 0) {
+            // No sessions survived filters — confirming a 0-call run is
+            // pointless. Fall through to the deterministic-only path,
+            // which produces a (mostly empty) report.
+            process.stderr.write("No sessions match the filters — skipping LLM analysis.\n")
+            return false
+          }
           const cached = await detectCachedFacets(metas)
           printEstimate(metas, metadata, modelLabel, cached)
           if (yes) return true
