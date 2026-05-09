@@ -33,7 +33,7 @@ describe("extractSessionMeta", () => {
           {
             type: "tool",
             tool: "bash",
-            state: { status: "error", output: "exit code 1\nboom" },
+            state: { status: "error", input: {}, error: "exit code 1\nboom" },
           },
         ],
       } as any,
@@ -50,6 +50,45 @@ describe("extractSessionMeta", () => {
     expect(meta.tool_counts.bash).toBe(1)
     expect(meta.languages.TypeScript).toBe(1)
     expect(meta.first_user_prompt).toBe("hello")
+  })
+
+  test("counts apply_patch lines added/removed and files modified", () => {
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: src/foo.ts",
+      "--- a/src/foo.ts",
+      "+++ b/src/foo.ts",
+      "@@ -1,3 +1,4 @@",
+      " context line",
+      "-removed line",
+      "+added line one",
+      "+added line two",
+      "*** End Patch",
+    ].join("\n")
+    const meta = extractSessionMeta(fixtureSession("s1", 0, 60_000), [
+      {
+        info: {
+          role: "assistant",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-7",
+          agent: "build",
+          time: { created: 1_000 },
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          cost: 0,
+        },
+        parts: [
+          {
+            type: "tool",
+            tool: "apply_patch",
+            state: { status: "completed", input: { patchText } },
+          },
+        ],
+      } as any,
+    ])
+    expect(meta.lines_added).toBe(2)
+    expect(meta.lines_removed).toBe(1)
+    expect(meta.files_modified).toBe(1)
+    expect(meta.tool_counts.apply_patch).toBe(1)
   })
 })
 

@@ -1,6 +1,6 @@
 import { extname } from "node:path"
 import { diffLines } from "diff"
-import type { MessageV2 } from "@/session/message-v2"
+import { MessageV2 } from "@/session/message-v2"
 import { detectMultiClauding } from "./multi-clauding"
 import type { Aggregate, SessionFacets, SessionMeta } from "./schema"
 
@@ -79,81 +79,89 @@ export function extractSessionMeta(
     const info = m.info
     if (info.role === "assistant") {
       assistant_message_count++
-      total_cost += info.cost ?? 0
-      input_tokens += info.tokens?.input ?? 0
-      output_tokens += info.tokens?.output ?? 0
-      reasoning_tokens += info.tokens?.reasoning ?? 0
-      cache_read_tokens += info.tokens?.cache?.read ?? 0
-      cache_write_tokens += info.tokens?.cache?.write ?? 0
+      total_cost += info.cost
+      input_tokens += info.tokens.input
+      output_tokens += info.tokens.output
+      reasoning_tokens += info.tokens.reasoning
+      cache_read_tokens += info.tokens.cache.read
+      cache_write_tokens += info.tokens.cache.write
       if (info.modelID) models_used.add(`${info.providerID}/${info.modelID}`)
       if (info.agent) agents_used.add(info.agent)
-      lastAssistantMs = info.time?.created ?? lastAssistantMs
+      lastAssistantMs = info.time.created
 
       for (const part of m.parts) {
         if (part.type !== "tool" || !part.tool) continue
         bump(tool_counts, part.tool)
         if (part.tool.startsWith("mcp__")) uses_mcp = true
-        if (part.tool === "task" || part.tool === "agent") uses_task_agent = true
+        if (part.tool === "task") uses_task_agent = true
         if (part.tool === "webfetch") uses_web_fetch = true
         if (part.tool === "websearch") uses_web_search = true
 
-        const state = part.state as { status?: string; output?: string; error?: string; input?: Record<string, unknown> }
-        const input = state?.input
-        if (input) {
-          const filePath = (input.file_path as string) || (input.path as string) || ""
-          if (filePath) {
-            const lang = langOf(filePath)
-            if (lang) bump(languages, lang)
-            if (part.tool === "edit" || part.tool === "write") filesModified.add(filePath)
-          }
-          if (part.tool === "edit") {
-            const oldS = (input.old_string as string) ?? ""
-            const newS = (input.new_string as string) ?? ""
-            for (const c of diffLines(oldS, newS)) {
-              if (c.added) lines_added += c.count ?? 0
-              if (c.removed) lines_removed += c.count ?? 0
-            }
-          }
-          if (part.tool === "write") {
-            const content = (input.content as string) ?? ""
-            if (content) lines_added += (content.match(/\n/g)?.length ?? 0) + 1
-          }
-          const cmd = (input.command as string) ?? ""
-          if (cmd.includes("git commit")) git_commits++
-          if (cmd.includes("git push")) git_pushes++
+        // ToolStatePending/Running/Completed/Error all carry `input`; only
+        // ToolStateCompleted has `output`, only ToolStateError has `error`.
+        const input = part.state.input
+        const filePath = (input.file_path as string) || (input.path as string) || ""
+        if (filePath) {
+          const lang = langOf(filePath)
+          if (lang) bump(languages, lang)
+          if (part.tool === "edit" || part.tool === "write") filesModified.add(filePath)
         }
+        if (part.tool === "edit") {
+          const oldS = (input.old_string as string) ?? ""
+          const newS = (input.new_string as string) ?? ""
+          for (const c of diffLines(oldS, newS)) {
+            if (c.added) lines_added += c.count ?? 0
+            if (c.removed) lines_removed += c.count ?? 0
+          }
+        }
+        if (part.tool === "write") {
+          const content = (input.content as string) ?? ""
+          if (content) lines_added += (content.match(/\n/g)?.length ?? 0) + 1
+        }
+        if (part.tool === "apply_patch") {
+          const patchText = (input.patchText as string) ?? ""
+          // Unified-diff format: '+' lines are added, '-' lines are removed,
+          // and "+++ b/<path>" headers identify modified files. Skip the
+          // "+++ "/"--- " header lines themselves.
+          for (const line of patchText.split("\n")) {
+            if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+              if (line.startsWith("+++ b/")) filesModified.add(line.slice("+++ b/".length))
+              continue
+            }
+            if (line.startsWith("+")) lines_added++
+            if (line.startsWith("-")) lines_removed++
+          }
+        }
+        const cmd = (input.command as string) ?? ""
+        if (cmd.includes("git commit")) git_commits++
+        if (cmd.includes("git push")) git_pushes++
 
-        if (state?.status === "error" || state?.error) {
+        if (part.state.status === "error") {
           tool_errors++
-          const out = String(state.output ?? state.error ?? "")
-          bump(tool_error_categories, categorizeToolError(out))
+          bump(tool_error_categories, categorizeToolError(part.state.error))
         }
       }
       continue
     }
 
     if (info.role === "user") {
-      const hasText = m.parts.some((p) => p.type === "text" && (p as { text?: string }).text?.trim())
+      const textParts = m.parts.filter((p): p is MessageV2.TextPart => p.type === "text")
+      const hasText = textParts.some((p) => p.text.trim())
       if (!hasText) continue
       user_message_count++
 
-      const created = info.time?.created
-      if (typeof created === "number") {
-        message_hours.push(new Date(created).getHours())
-        user_message_timestamps_ms.push(created)
-        if (lastAssistantMs !== null) {
-          const dt = (created - lastAssistantMs) / 1000
-          if (dt > 2 && dt < 3600) user_response_times_sec.push(dt)
-        }
+      const created = info.time.created
+      message_hours.push(new Date(created).getHours())
+      user_message_timestamps_ms.push(created)
+      if (lastAssistantMs !== null) {
+        const dt = (created - lastAssistantMs) / 1000
+        if (dt > 2 && dt < 3600) user_response_times_sec.push(dt)
       }
       if (!first_user_prompt) {
-        const t = m.parts.find((p) => p.type === "text") as { text?: string } | undefined
+        const t = textParts[0]
         if (t?.text) first_user_prompt = t.text.slice(0, 500)
       }
-      const fullText = m.parts
-        .filter((p) => p.type === "text")
-        .map((p) => (p as { text?: string }).text ?? "")
-        .join("\n")
+      const fullText = textParts.map((p) => p.text).join("\n")
       if (fullText.includes("[Request interrupted by user")) user_interruptions++
     }
   }
@@ -161,7 +169,7 @@ export function extractSessionMeta(
   return {
     session_id: session.id,
     project_id: session.projectID,
-    project_path: session.directory ?? "",
+    project_path: session.directory,
     start_time: session.time.created,
     end_time: session.time.updated,
     duration_minutes: Math.max(0, Math.round((session.time.updated - session.time.created) / 60_000)),
