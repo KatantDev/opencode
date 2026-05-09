@@ -27,7 +27,8 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ESC_MAP[c]!)
  * blocks (headings, lists, paragraphs) use `renderMarkdown` instead.
  */
 function renderInline(s: string): string {
-  return esc(s)
+  const normalized = s.replace(/\r\n?/g, "\n")
+  return esc(normalized)
     .replace(/`([^`]+?)`/g, (_m, body: string) => `<code>${body}</code>`)
     .replace(/\*\*([^*\n][^*\n]*?)\*\*/g, (_m, body: string) => `<strong>${body}</strong>`)
     .replace(/(^|[\s(])\*([^*\n]+?)\*(?=$|[\s.,;:!?)])/g, (_m, lead: string, body: string) => `${lead}<em>${body}</em>`)
@@ -55,10 +56,14 @@ function renderInline(s: string): string {
  * never ask for these.
  */
 function renderMarkdown(input: string): string {
+  // 0. Normalize CRLF / lone CR to LF so block-split + line-marker regexes
+  //    don't have a stray \r tagging along on each line.
+  const normalized = input.replace(/\r\n?/g, "\n")
+
   // 1. Pull fenced code blocks out first so their internals don't get
   //    re-interpreted as headings / lists.
   const codeBlocks: string[] = []
-  const stashed = input.replace(/```[a-zA-Z0-9_+-]*\n([\s\S]*?)```/g, (_m, body: string) => {
+  const stashed = normalized.replace(/```[a-zA-Z0-9_+-]*\n([\s\S]*?)```/g, (_m, body: string) => {
     codeBlocks.push(body.replace(/\n$/, ""))
     return `\u0000CODE${codeBlocks.length - 1}\u0000`
   })
@@ -116,9 +121,10 @@ function renderMarkdown(input: string): string {
       if (buf.lines.length === 0) return
       if (buf.mode === "para") {
         out.push(`<p>${renderInline(buf.lines.join("\n")).replace(/\n/g, "<br>")}</p>`)
-      } else {
-        out.push(renderListLines(buf.lines, buf.mode === "ul"))
+        buf.lines = []
+        return
       }
+      out.push(renderListLines(buf.lines, buf.mode === "ul"))
       buf.lines = []
     }
 
@@ -135,6 +141,17 @@ function renderMarkdown(input: string): string {
       const isUL = ulMarker.test(line)
       const isOL = !isUL && olMarker.test(line)
       const lineMode: Mode = isUL ? "ul" : isOL ? "ol" : "para"
+      // Indented continuation of an active list item: keep it in list mode so
+      // `renderListLines` can fold it into the previous <li>.
+      const isContinuation =
+        (buf.mode === "ul" || buf.mode === "ol") &&
+        lineMode === "para" &&
+        line.trim() !== "" &&
+        /^\s+\S/.test(line)
+      if (isContinuation) {
+        buf.lines.push(line)
+        continue
+      }
       // Mode change → flush previous group.
       if (lineMode !== buf.mode && buf.lines.length > 0) flushBuf()
       buf.mode = lineMode

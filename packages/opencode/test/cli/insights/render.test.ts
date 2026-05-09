@@ -168,4 +168,60 @@ describe("renderReport", () => {
     const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
     expect(html).toContain("<ol><li>Do A</li><li>Do B</li><li>Do C</li></ol>")
   })
+
+  test("normalizes \\r\\n line endings before parsing markdown", () => {
+    const sections: Sections = {
+      interaction_style: { narrative: "## Title\r\n\r\nFirst paragraph.\r\n\r\n- one\r\n- two", key_pattern: "" },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<h4>Title</h4>")
+    expect(html).toContain("<p>First paragraph.</p>")
+    expect(html).toContain("<ul><li>one</li><li>two</li></ul>")
+  })
+
+  test("joins indented continuation lines into the previous list item", () => {
+    const sections: Sections = {
+      suggestions: {
+        agents_md_additions: [
+          {
+            addition: "- first item that\n  continues on next line\n- second item",
+            why: "",
+            prompt_scaffold: "",
+          },
+        ],
+        features_to_try: [],
+        usage_patterns: [],
+      },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<li>first item that continues on next line</li>")
+    expect(html).toContain("<li>second item</li>")
+  })
+
+  test("heading immediately followed by list (no blank line)", () => {
+    const sections: Sections = {
+      suggestions: {
+        agents_md_additions: [
+          {
+            addition: "## Title\n- one\n- two",
+            why: "",
+            prompt_scaffold: "",
+          },
+        ],
+        features_to_try: [],
+        usage_patterns: [],
+      },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<h4>Title</h4>")
+    expect(html).toContain("<ul><li>one</li><li>two</li></ul>")
+  })
+
+  test("# heading renders as h3 (h1/h2 reserved for shell + sections)", () => {
+    const sections: Sections = {
+      interaction_style: { narrative: "# Solo hash heading", key_pattern: "" },
+    }
+    const html = renderReport({ aggregate: baseAggregate, sections, generated_at_iso: "x" })
+    expect(html).toContain("<h3>Solo hash heading</h3>")
+  })
 })
