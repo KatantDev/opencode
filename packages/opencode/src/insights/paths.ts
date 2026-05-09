@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises"
 
 const xdgDataHome = () => process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share")
 
-export const root = () => path.join(xdgDataHome(), "opencode", "insights")
+export const root = () => process.env["OPENCODE_INSIGHTS_DIR"] ?? path.join(xdgDataHome(), "opencode", "insights")
 export const facetsDir = () => path.join(root(), "facets")
 export const reportsDir = () => path.join(root(), "reports")
 export const ensure = async (p: string) => {
