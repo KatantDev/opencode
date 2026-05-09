@@ -334,8 +334,13 @@ const CSS = String.raw`
     color: var(--fg-strong);
     list-style: none;
   }
-  details > summary::before { content: "▸ "; color: var(--fg-weak); }
-  details[open] > summary::before { content: "▾ "; }
+  /* Triangles use CSS unicode escapes (\\25B8 / \\25BE with trailing space)
+     instead of literal ▸ / ▾ characters. Reason: Bun's String.raw transpiles
+     non-ASCII characters in raw template literals to their JS escape form
+     (\u25B8), which the browser renders as the literal text "u25B8" rather
+     than the glyph. CSS escapes survive the round-trip cleanly. */
+  details > summary::before { content: "\25B8 "; color: var(--fg-weak); }
+  details[open] > summary::before { content: "\25BE "; }
 
   ul, ol { padding-left: 1.25rem; }
   li { margin: .125rem 0; }

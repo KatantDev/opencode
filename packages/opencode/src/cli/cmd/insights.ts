@@ -4,7 +4,6 @@ import { effectCmd, fail } from "../effect-cmd"
 import { Insights, type ProgressEvent, type RunResult } from "@/insights/insights"
 import { reportsDir } from "@/insights/paths"
 import { resolveLanguageModel, resolveModelMetadata } from "@/insights/model"
-import { estimateLLMCost } from "@/insights/cost"
 import { loadCachedFacet } from "@/insights/facets"
 import type { Provider } from "@/provider/provider"
 import type { SessionMeta } from "@/insights/schema"
@@ -82,19 +81,6 @@ function makeProgressReporter(): ProgressReporter {
   return { report, finish }
 }
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return `${n}`
-}
-
-function formatSeconds(s: number): string {
-  if (s < 60) return `~${s}s`
-  const m = Math.floor(s / 60)
-  const rem = s % 60
-  return rem === 0 ? `~${m}m` : `~${m}m ${rem}s`
-}
-
 /**
  * Bounded `Promise.all` — runs `fn` over `items` with at most `limit`
  * concurrent invocations. Used to keep file-handle usage sane on machines
@@ -162,28 +148,35 @@ function printRunSummary(r: RunResult, modelLabel: string): void {
   process.stderr.write(lines.join("\n"))
 }
 
-function printEstimate(
-  metas: SessionMeta[],
-  model: Provider.Model,
-  modelLabel: string,
-  cached: ReadonlySet<string>,
-): void {
-  const e = estimateLLMCost(model, metas, { cachedSessionIds: cached })
-  const facetLine =
-    e.chunkSummaryCalls > 0
-      ? `  Facet calls:     ${e.facetCalls} (+${e.chunkSummaryCalls} chunk summaries)`
-      : `  Facet calls:     ${e.facetCalls}`
-  const cacheLine = e.cachedFacets > 0 ? [`  Cached facets:   ${e.cachedFacets} (skipped, $0)`] : []
+/**
+ * Pre-flight notice shown before the LLM-confirmation prompt.
+ *
+ * We deliberately avoid quoting hard cost / token / time numbers up front:
+ * actual figures depend on prompt-cache discounts, transcript length variance,
+ * provider latency, and reasoning-token rates that the pre-flight estimate
+ * doesn't model. A precise-looking "$8.75 / 8m 8s" would mislead more than
+ * inform — most real runs come in 30-70% lower thanks to prompt caching.
+ *
+ * Instead we surface the only two numbers that ARE precise at this stage —
+ * the session count and the cache-hit count — and a soft warning. The full
+ * post-run breakdown (real cost via `Session.getUsage`, real wall-clock
+ * duration) lives in `printRunSummary`, after the run actually completes.
+ */
+function printPreRunNotice(metas: SessionMeta[], modelLabel: string, cached: ReadonlySet<string>): void {
+  const fresh = metas.length - cached.size
+  const cachedNote =
+    cached.size > 0 ? ` (${cached.size} already cached, ${fresh} need fresh analysis)` : ""
   const lines = [
     "",
-    "LLM analysis estimate:",
-    `  Sessions:        ${metas.length}`,
-    ...cacheLine,
-    facetLine,
-    `  Section calls:   ${e.sectionCalls}`,
-    `  Est. tokens:     ~${formatTokens(e.inputTokens)} input / ~${formatTokens(e.outputTokens)} output`,
-    `  Est. cost:       ~$${e.costUSD.toFixed(2)} (${modelLabel})`,
-    `  Est. time:       ${formatSeconds(e.estSeconds)}`,
+    "  About to run LLM analysis.",
+    "",
+    `  Model:     ${modelLabel}`,
+    `  Sessions:  ${metas.length}${cachedNote}`,
+    "",
+    "  This may take several minutes and consume a non-trivial amount of",
+    "  tokens depending on session length and history depth. The exact cost",
+    "  depends on prompt caching and provider rates — it's reported once the",
+    "  run finishes.",
     "",
   ]
   process.stderr.write(lines.join("\n"))
@@ -269,7 +262,7 @@ export const InsightsCommand = effectCmd({
             return false
           }
           const cached = await detectCachedFacets(metas)
-          printEstimate(metas, metadata, modelLabel, cached)
+          printPreRunNotice(metas, modelLabel, cached)
           if (yes) return true
           if (!process.stderr.isTTY) {
             process.stderr.write(
